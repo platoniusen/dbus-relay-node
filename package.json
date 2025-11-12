@@ -1,0 +1,15 @@
+{
+  "name": "@robertsvendsen/dbus-relay-node",
+  "version": "1.0.0",
+  "description": "",
+  "license": "ISC",
+  "author": "",
+  "type": "commonjs",
+  "main": "service.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "dependencies": {
+    "dbus-next": "^0.10.2"
+  }
+}

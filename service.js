@@ -39,10 +39,28 @@ function urgencyToHint(u) {
 
 async function notify(bus, payload) {
   const summary = payload.summary || payload.title || '(no title)';
-  const body = payload.body || '';
+  let body = payload.body || '';
   const icon = payload.icon || '';
   const app = payload.app || 'notify-relay';
   const expire = Number.isFinite(payload.timeout) ? Math.trunc(payload.timeout) : -1;
+
+  // If we find a path (/ x 2) in the body, let's just use the last part as the body
+  if (body && body.includes('/')) {
+    const parts = body.split(/\s+/);
+    for (let i = parts.length - 1; i >= 0; i--) {
+      if (parts[i].includes('/')) {
+        const subparts = parts[i].split('/');
+        const lastPart = subparts[subparts.length - 1];
+        if (lastPart) {
+          // Use this as the body
+          body = lastPart;
+          break;
+        }
+      }
+    }
+  }
+
+  body = body.trim();
 
   const hints = {};
   const urg = urgencyToHint(payload.urgency);
@@ -50,15 +68,20 @@ async function notify(bus, payload) {
   if (payload.category) hints['category'] = new Variant('s', String(payload.category));
   if (payload.sound === false) hints['sound-file'] = new Variant('s', ''); // simplistic mute
 
-  if (!payload.sound) {
-    execSync('aplay 810754__mokasza__level-up-02.mp3');
-  }
-
   const obj = await bus.getProxyObject('org.freedesktop.Notifications', '/org/freedesktop/Notifications');
   const iface = obj.getInterface('org.freedesktop.Notifications');
 
   // signature: Notify(s app_name, u replaces_id, s app_icon, s summary, s body, as actions, a{sv} hints, i expire_timeout) → (u id)
-  return iface.Notify(app, 0, icon, summary, body, [], hints, expire);
+  const notifyState = iface.Notify(app, 0, icon, summary, body, [], hints, expire);
+
+  // Call the fallback sound if sound is not disabled or specified something else.
+  if (!payload.sound) {
+    execSync(`aplay -d 3 ${__dirname}/825639__1love__1love_fx_winner.wav`, {
+      timeout: 5000,
+    });
+  }
+
+  return notifyState;
 }
 
 // ---- Main: create socket + D-Bus session ----------------------------------

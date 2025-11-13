@@ -2,6 +2,13 @@
 
 A production-ready Unix socket server that relays notifications to the freedesktop.org Notifications D-Bus interface with optional audio feedback.
 
+Created for system administrators and developers who need to send desktop notifications from background services, cron jobs, or scripts running as different users.
+
+My use case is to allow sending notifications from any user running Claude Code – I have one work user and one personal user – and when I am working
+I was not able to use Sound hooks or notifications to notify me when Claude Code was waiting for input or was finished.
+
+This fixes that.
+
 ## Features
 
 ### Server (service.js)

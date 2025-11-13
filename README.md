@@ -274,28 +274,92 @@ Log levels:
 
 ## systemd Integration
 
-Create `/etc/systemd/user/notify-relay.service`:
+A systemd user service file is included for automatic startup.
 
-```ini
-[Unit]
-Description=D-Bus Notification Relay
-After=dbus.service
+### Installation
 
-[Service]
-Type=simple
-ExecStart=/usr/bin/node /path/to/service.js
-Restart=on-failure
-Environment="NOTIFY_RELAY_LOG_LEVEL=info"
-
-[Install]
-WantedBy=default.target
-```
-
-Enable and start:
+**1. Copy the service file to your systemd user directory:**
 
 ```bash
-systemctl --user enable notify-relay
-systemctl --user start notify-relay
+mkdir -p ~/.config/systemd/user
+cp systemd.service.example ~/.config/systemd/user/dbus-relay-node.service
+```
+
+**2. Edit the service file if needed:**
+
+The example file uses systemd specifiers that automatically adapt to your user:
+- `%h` - Your home directory
+- `%U` - Your user ID (UID)
+
+If your installation path differs from `~/dbus-relay-node/`, edit the `ExecStart` line:
+
+```bash
+nano ~/.config/systemd/user/dbus-relay-node.service
+```
+
+**3. Reload systemd and enable the service:**
+
+```bash
+systemctl --user daemon-reload
+systemctl --user enable dbus-relay-node.service
+systemctl --user start dbus-relay-node.service
+```
+
+**4. Verify the service is running:**
+
+```bash
+systemctl --user status dbus-relay-node.service
+```
+
+### Service Management
+
+**Check logs:**
+```bash
+journalctl --user -u dbus-relay-node.service -f
+```
+
+**Restart the service:**
+```bash
+systemctl --user restart dbus-relay-node.service
+```
+
+**Stop the service:**
+```bash
+systemctl --user stop dbus-relay-node.service
+```
+
+**Disable auto-start:**
+```bash
+systemctl --user disable dbus-relay-node.service
+```
+
+### Enable Linger (Optional)
+
+To keep the service running even when you're not logged in:
+
+```bash
+sudo loginctl enable-linger $USER
+```
+
+### Custom Configuration
+
+To add environment variables, edit your service file and add them under `[Service]`:
+
+```ini
+[Service]
+Type=simple
+ExecStart=node %h/dbus-relay-node/service.js
+Restart=always
+RestartSec=1
+Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/%U/bus
+Environment=NOTIFY_RELAY_LOG_LEVEL=debug
+Environment=NOTIFY_RELAY_SOUND_ENABLED=false
+```
+
+Then reload and restart:
+```bash
+systemctl --user daemon-reload
+systemctl --user restart dbus-relay-node.service
 ```
 
 ## Use Cases

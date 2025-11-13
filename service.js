@@ -2,7 +2,7 @@
 /**
  * D-Bus Notification Relay Service
  *
- * A production-ready Unix socket server that relays notifications to the
+ * A Unix socket server that relays notifications to the
  * freedesktop.org Notifications D-Bus interface with optional audio feedback.
  *
  * Accepts either:

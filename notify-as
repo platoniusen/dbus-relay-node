@@ -1,0 +1,190 @@
+#!/usr/bin/env bash
+#
+# notify-as - Client for D-Bus Notification Relay Service
+#
+# Send desktop notifications to a specific user through the Unix socket relay.
+#
+# Usage:
+#   notify-as <desktop-user> "Title" "Body"
+#   notify-as <desktop-user> --json '{"summary":"Title","body":"Body","urgency":"critical"}'
+#   notify-as <desktop-user> --help
+#
+# Environment Variables:
+#   NOTIFY_RELAY_SOCK - Custom socket path (default: /tmp/notify-<uid>.sock)
+#   NOTIFY_AS_TIMEOUT - Socket connection timeout in seconds (default: 5)
+#
+set -euo pipefail
+
+# Configuration
+TIMEOUT="${NOTIFY_AS_TIMEOUT:-5}"
+VERSION="1.0.0"
+
+# Colors for output (if terminal supports it)
+if [[ -t 2 ]]; then
+  RED='\033[0;31m'
+  YELLOW='\033[0;33m'
+  NC='\033[0m' # No Color
+else
+  RED=''
+  YELLOW=''
+  NC=''
+fi
+
+# Helper functions
+error() {
+  echo -e "${RED}Error:${NC} $*" >&2
+}
+
+warn() {
+  echo -e "${YELLOW}Warning:${NC} $*" >&2
+}
+
+show_help() {
+  cat << EOF
+notify-as v${VERSION} - Send notifications through D-Bus Relay
+
+Usage:
+  notify-as <desktop-user> <title> [body]
+  notify-as <desktop-user> --json '<json-payload>'
+  notify-as --help
+  notify-as --version
+
+Arguments:
+  <desktop-user>  Username of the desktop user to notify
+  <title>         Notification title
+  [body]          Notification body (optional)
+  --json          Use JSON payload format
+
+JSON Payload Format:
+  {
+    "summary": "Title",
+    "body": "Body text",
+    "urgency": "low|normal|critical",
+    "icon": "dialog-information",
+    "timeout": 5000,
+    "sound": false
+  }
+
+Environment Variables:
+  NOTIFY_RELAY_SOCK  Custom socket path (default: /tmp/notify-<uid>.sock)
+  NOTIFY_AS_TIMEOUT  Connection timeout in seconds (default: 5)
+
+Examples:
+  # Simple notification
+  notify-as robert "Build Complete" "Your project built successfully"
+
+  # JSON format with urgency
+  notify-as robert --json '{"summary":"Error","body":"Build failed","urgency":"critical"}'
+
+  # Custom socket path
+  NOTIFY_RELAY_SOCK=/custom/notify.sock notify-as robert "Test" "Message"
+
+EOF
+  exit 0
+}
+
+# Parse arguments
+if (( $# < 1 )); then
+  error "Missing arguments"
+  echo "Usage: notify-as <desktop-user> <title> [body]" >&2
+  echo "   or: notify-as <desktop-user> --json '<json>'" >&2
+  echo "   or: notify-as --help" >&2
+  exit 2
+fi
+
+# Handle help/version flags
+case "${1:-}" in
+  --help|-h)
+    show_help
+    ;;
+  --version|-v)
+    echo "notify-as version ${VERSION}"
+    exit 0
+    ;;
+esac
+
+if (( $# < 2 )); then
+  error "Missing arguments"
+  echo "Usage: notify-as <desktop-user> <title> [body]" >&2
+  echo "   or: notify-as <desktop-user> --json '<json>'" >&2
+  exit 2
+fi
+
+desk="$1"; shift
+
+# Validate user exists and get UID
+if ! uid=$(id -u "$desk" 2>/dev/null); then
+  error "User '$desk' not found"
+  exit 1
+fi
+
+# Determine socket path
+sock="${NOTIFY_RELAY_SOCK:-/tmp/notify-${uid}.sock}"
+
+# Build payload
+if [[ "${1:-}" == "--json" ]]; then
+  shift
+  payload="${1:-}"
+
+  if [[ -z "$payload" ]]; then
+    error "JSON payload is empty"
+    exit 2
+  fi
+
+  # Validate JSON format (basic check)
+  if ! echo "$payload" | grep -q '^[[:space:]]*{.*}[[:space:]]*$'; then
+    error "Invalid JSON format"
+    exit 2
+  fi
+else
+  title="${1:-}"
+  body="${2:-}"
+
+  if [[ -z "$title" ]]; then
+    error "Title cannot be empty"
+    exit 2
+  fi
+
+  # JSON escape function for quotes, backslashes, and control characters
+  json_escape() {
+    printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g; s/\t/\\t/g; s/\n/\\n/g; s/\r/\\r/g'
+  }
+
+  payload=$(printf '{"summary":"%s","body":"%s"}' "$(json_escape "$title")" "$(json_escape "$body")")
+fi
+
+# Validate dependencies
+if ! command -v socat >/dev/null 2>&1; then
+  error "'socat' command not found"
+  echo "Install it with: sudo apt install socat (Debian/Ubuntu) or sudo yum install socat (RHEL/CentOS)" >&2
+  exit 1
+fi
+
+# Validate socket exists and is accessible
+if [[ ! -e "$sock" ]]; then
+  error "Socket not found: $sock"
+  echo "Ensure the relay service is running for user '$desk'" >&2
+  echo "Start with: node /path/to/service.js" >&2
+  exit 1
+fi
+
+if [[ ! -S "$sock" ]]; then
+  error "Path exists but is not a socket: $sock"
+  exit 1
+fi
+
+if [[ ! -r "$sock" || ! -w "$sock" ]]; then
+  error "Permission denied for socket: $sock"
+  echo "Socket permissions: $(stat -c '%a' "$sock" 2>/dev/null || stat -f '%p' "$sock" 2>/dev/null || echo 'unknown')" >&2
+  echo "Adjust relay socket permissions (NOTIFY_RELAY_SOCKET_PERMISSIONS env) or your group membership" >&2
+  exit 1
+fi
+
+# Send notification with timeout
+if ! printf '%s' "$payload" | timeout "$TIMEOUT" socat - "UNIX-CONNECT:$sock" 2>/dev/null; then
+  error "Failed to send notification"
+  echo "The relay service may not be responding" >&2
+  exit 1
+fi
+
+exit 0

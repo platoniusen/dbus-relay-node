@@ -1,32 +1,84 @@
 #!/usr/bin/env node
 /**
- * Notify relay: Unix socket -> org.freedesktop.Notifications (session D-Bus)
+ * D-Bus Notification Relay Service
+ *
+ * A production-ready Unix socket server that relays notifications to the
+ * freedesktop.org Notifications D-Bus interface with optional audio feedback.
+ *
  * Accepts either:
- *  - JSON: {"summary":"Title","body":"Body","urgency":"low|normal|critical","icon":"dialog-information","timeout":5000,"app":"notify-relay"}
+ *  - JSON: {"summary":"Title","body":"Body","urgency":"low|normal|critical","icon":"dialog-information","timeout":5000,"app":"notify-relay","sound":false}
  *  - Plain: "Title|Body"
  *
- * Socket path: /run/user/<uid>/notify.sock  (created with 0666 by default; see notes)
+ * Environment Variables:
+ *  - NOTIFY_RELAY_SOCK: Unix socket path (default: /tmp/notify-<uid>.sock)
+ *  - NOTIFY_RELAY_SOUND: Path to sound file (default: ./825639__1love__1love_fx_winner.wav)
+ *  - NOTIFY_RELAY_SOUND_ENABLED: Enable/disable sound (default: true)
+ *  - NOTIFY_RELAY_SOUND_TIMEOUT: Sound playback timeout in ms (default: 5000)
+ *  - NOTIFY_RELAY_SOCKET_PERMISSIONS: Socket file permissions (default: 0666)
+ *  - NOTIFY_RELAY_LOG_LEVEL: Logging level: debug|info|warn|error (default: info)
  */
 const fs = require('fs');
 const net = require('net');
-const os = require('os');
+const path = require('path');
 const { execSync } = require('child_process');
 const { Variant, sessionBus } = require('dbus-next');
 
+// ---- Configuration ---------------------------------------------------------
 const UID = process.getuid();
 const RUNTIME_DIR = process.env.XDG_RUNTIME_DIR || `/run/user/${UID}`;
-const DEFAULT_SOCK = `/tmp/notify-${UID}.sock`;             // <— new default
+const DEFAULT_SOCK = `/tmp/notify-${UID}.sock`;
 const SOCK_PATH = process.env.NOTIFY_RELAY_SOCK || DEFAULT_SOCK;
+const SOUND_FILE = process.env.NOTIFY_RELAY_SOUND || path.join(__dirname, '825639__1love__1love_fx_winner.wav');
+const SOUND_ENABLED = process.env.NOTIFY_RELAY_SOUND_ENABLED !== 'false';
+const SOUND_TIMEOUT = parseInt(process.env.NOTIFY_RELAY_SOUND_TIMEOUT, 10) || 5000;
+const SOCKET_PERMISSIONS = parseInt(process.env.NOTIFY_RELAY_SOCKET_PERMISSIONS, 8) || 0o666;
+const LOG_LEVEL = (process.env.NOTIFY_RELAY_LOG_LEVEL || 'info').toLowerCase();
+
+// ---- Logging ---------------------------------------------------------------
+const LOG_LEVELS = { debug: 0, info: 1, warn: 2, error: 3 };
+const currentLogLevel = LOG_LEVELS[LOG_LEVEL] ?? LOG_LEVELS.info;
+
+function log(level, ...args) {
+  if (LOG_LEVELS[level] >= currentLogLevel) {
+    const timestamp = new Date().toISOString();
+    console.log(`[${timestamp}] [${level.toUpperCase()}]`, ...args);
+  }
+}
+
+const logger = {
+  debug: (...args) => log('debug', ...args),
+  info: (...args) => log('info', ...args),
+  warn: (...args) => log('warn', ...args),
+  error: (...args) => log('error', ...args)
+};
 
 // ---- Helpers ---------------------------------------------------------------
 function parsePayload(buf) {
   const text = buf.toString('utf8').trim();
-  if (!text) return null;
-  if (text.startsWith('{')) {
-    try { return JSON.parse(text); } catch { /* fall through */ }
+  if (!text) {
+    logger.debug('Received empty payload');
+    return null;
   }
+
+  // Try JSON parsing first
+  if (text.startsWith('{')) {
+    try {
+      const parsed = JSON.parse(text);
+      logger.debug('Parsed JSON payload:', parsed);
+      return parsed;
+    } catch (err) {
+      logger.warn('Failed to parse JSON, falling back to plain text:', err.message);
+    }
+  }
+
+  // Fallback to plain text format "Title|Body"
   const [summary, body] = text.split('|', 2);
-  return { summary: (summary || '').trim(), body: body ? body.trim() : '' };
+  const payload = {
+    summary: (summary || '').trim(),
+    body: body ? body.trim() : ''
+  };
+  logger.debug('Parsed plain text payload:', payload);
+  return payload;
 }
 
 function urgencyToHint(u) {
@@ -34,7 +86,31 @@ function urgencyToHint(u) {
   const map = { low: 0, normal: 1, critical: 2 };
   if (u == null) return undefined;
   const key = String(u).toLowerCase();
-  return map[key] ?? 1;
+  const result = map[key] ?? 1;
+  logger.debug(`Urgency mapping: "${u}" -> ${result}`);
+  return result;
+}
+
+function playSound(soundPath) {
+  if (!SOUND_ENABLED) {
+    logger.debug('Sound playback disabled');
+    return;
+  }
+
+  if (!fs.existsSync(soundPath)) {
+    logger.warn(`Sound file not found: ${soundPath}`);
+    return;
+  }
+
+  try {
+    logger.debug(`Playing sound: ${soundPath}`);
+    execSync(`aplay -d 3 "${soundPath}"`, {
+      timeout: SOUND_TIMEOUT,
+      stdio: 'ignore'
+    });
+  } catch (err) {
+    logger.error('Failed to play sound:', err.message);
+  }
 }
 
 async function notify(bus, payload) {
@@ -44,7 +120,7 @@ async function notify(bus, payload) {
   const app = payload.app || 'notify-relay';
   const expire = Number.isFinite(payload.timeout) ? Math.trunc(payload.timeout) : -1;
 
-  // If we find a path (/ x 2) in the body, let's just use the last part as the body
+  // Extract filename from path if present (simplify long paths)
   if (body && body.includes('/')) {
     const parts = body.split(/\s+/);
     for (let i = parts.length - 1; i >= 0; i--) {
@@ -52,7 +128,6 @@ async function notify(bus, payload) {
         const subparts = parts[i].split('/');
         const lastPart = subparts[subparts.length - 1];
         if (lastPart) {
-          // Use this as the body
           body = lastPart;
           break;
         }
@@ -62,63 +137,162 @@ async function notify(bus, payload) {
 
   body = body.trim();
 
+  // Build D-Bus hints
   const hints = {};
   const urg = urgencyToHint(payload.urgency);
   if (urg !== undefined) hints['urgency'] = new Variant('y', urg);
   if (payload.category) hints['category'] = new Variant('s', String(payload.category));
-  if (payload.sound === false) hints['sound-file'] = new Variant('s', ''); // simplistic mute
+  if (payload.sound === false) hints['sound-file'] = new Variant('s', '');
 
-  const obj = await bus.getProxyObject('org.freedesktop.Notifications', '/org/freedesktop/Notifications');
-  const iface = obj.getInterface('org.freedesktop.Notifications');
+  logger.debug('Sending notification:', { app, summary, body, icon, expire });
 
-  // signature: Notify(s app_name, u replaces_id, s app_icon, s summary, s body, as actions, a{sv} hints, i expire_timeout) → (u id)
-  const notifyState = iface.Notify(app, 0, icon, summary, body, [], hints, expire);
+  try {
+    const obj = await bus.getProxyObject('org.freedesktop.Notifications', '/org/freedesktop/Notifications');
+    const iface = obj.getInterface('org.freedesktop.Notifications');
 
-  // Call the fallback sound if sound is not disabled or specified something else.
-  if (!payload.sound) {
-    execSync(`aplay -d 3 ${__dirname}/825639__1love__1love_fx_winner.wav`, {
-      timeout: 5000,
-    });
+    // signature: Notify(s app_name, u replaces_id, s app_icon, s summary, s body, as actions, a{sv} hints, i expire_timeout) → (u id)
+    const notificationId = await iface.Notify(app, 0, icon, summary, body, [], hints, expire);
+    logger.info(`Notification sent: "${summary}" (ID: ${notificationId})`);
+
+    // Play sound if not explicitly disabled
+    if (payload.sound !== false) {
+      playSound(SOUND_FILE);
+    }
+
+    return notificationId;
+  } catch (err) {
+    logger.error('Failed to send notification:', err.message);
+    throw err;
   }
-
-  return notifyState;
 }
 
 // ---- Main: create socket + D-Bus session ----------------------------------
 (async () => {
+  // Display startup configuration
+  logger.info('D-Bus Notification Relay Service starting...');
+  logger.info('Configuration:', {
+    socketPath: SOCK_PATH,
+    soundEnabled: SOUND_ENABLED,
+    soundFile: SOUND_FILE,
+    soundTimeout: SOUND_TIMEOUT,
+    socketPermissions: SOCKET_PERMISSIONS.toString(8),
+    logLevel: LOG_LEVEL
+  });
+
   // Ensure single instance: remove stale socket
-  try { fs.unlinkSync(SOCK_PATH); } catch (_) {}
+  try {
+    if (fs.existsSync(SOCK_PATH)) {
+      fs.unlinkSync(SOCK_PATH);
+      logger.debug('Removed stale socket');
+    }
+  } catch (err) {
+    logger.error('Failed to remove stale socket:', err.message);
+    process.exit(1);
+  }
 
-  const bus = sessionBus(); // uses DBUS_SESSION_BUS_ADDRESS from environment under user
-  bus.on('error', (e) => console.error('D-Bus error:', e));
+  // Initialize D-Bus connection
+  let bus;
+  try {
+    bus = sessionBus();
+    bus.on('error', (err) => logger.error('D-Bus error:', err.message));
+    logger.debug('D-Bus session bus connected');
+  } catch (err) {
+    logger.error('Failed to connect to D-Bus session bus:', err.message);
+    logger.error('Ensure DBUS_SESSION_BUS_ADDRESS is set correctly');
+    process.exit(1);
+  }
 
+  // Create Unix socket server
   const server = net.createServer(async (socket) => {
+    const clientInfo = `${socket.remoteAddress}:${socket.remotePort}`;
+    logger.debug(`Client connected: ${clientInfo}`);
+
     const chunks = [];
-    socket.on('data', (d) => chunks.push(d));
+    let hasError = false;
+
+    socket.on('data', (data) => {
+      chunks.push(data);
+      // Prevent memory exhaustion from large payloads
+      const totalSize = chunks.reduce((sum, chunk) => sum + chunk.length, 0);
+      if (totalSize > 1024 * 1024) { // 1MB limit
+        logger.warn(`Client ${clientInfo} sent payload too large (>${totalSize} bytes)`);
+        hasError = true;
+        socket.end();
+      }
+    });
+
     socket.on('end', async () => {
+      if (hasError) return;
+
       try {
         const payload = parsePayload(Buffer.concat(chunks));
-        if (!payload || !payload.summary) throw new Error('invalid payload');
+
+        if (!payload) {
+          throw new Error('Empty or invalid payload');
+        }
+
+        if (!payload.summary || payload.summary.trim() === '') {
+          throw new Error('Missing required field: summary');
+        }
+
         await notify(bus, payload);
       } catch (err) {
-        // don’t crash the server on bad input
-        console.error('notify error:', err?.message || err);
+        logger.error(`Notification error from ${clientInfo}:`, err.message);
       } finally {
         socket.end();
       }
     });
+
+    socket.on('error', (err) => {
+      logger.error(`Socket error from ${clientInfo}:`, err.message);
+    });
   });
 
+  // Handle server errors
+  server.on('error', (err) => {
+    logger.error('Server error:', err.message);
+    if (err.code === 'EADDRINUSE') {
+      logger.error(`Socket ${SOCK_PATH} is already in use`);
+      process.exit(1);
+    }
+  });
+
+  // Start listening
   server.listen(SOCK_PATH, () => {
     try {
-      // Default open to everyone (easy). If you want to restrict, see “Security” below.
-      fs.chmodSync(SOCK_PATH, 0o666);
-    } catch (_) {}
-    console.log(`notify-relay listening on ${SOCK_PATH}`);
+      fs.chmodSync(SOCK_PATH, SOCKET_PERMISSIONS);
+      logger.info(`Server listening on ${SOCK_PATH} (permissions: ${SOCKET_PERMISSIONS.toString(8)})`);
+    } catch (err) {
+      logger.warn('Failed to set socket permissions:', err.message);
+    }
   });
 
   // Clean up on exit
-  const cleanup = () => { try { fs.unlinkSync(SOCK_PATH); } catch (_) {} process.exit(0); };
+  const cleanup = () => {
+    logger.info('Shutting down...');
+    server.close();
+    try {
+      if (fs.existsSync(SOCK_PATH)) {
+        fs.unlinkSync(SOCK_PATH);
+        logger.debug('Socket removed');
+      }
+    } catch (err) {
+      logger.error('Failed to remove socket:', err.message);
+    }
+    process.exit(0);
+  };
+
   process.on('SIGINT', cleanup);
   process.on('SIGTERM', cleanup);
+
+  // Handle uncaught errors
+  process.on('uncaughtException', (err) => {
+    logger.error('Uncaught exception:', err.message);
+    logger.error(err.stack);
+    cleanup();
+  });
+
+  process.on('unhandledRejection', (reason, promise) => {
+    logger.error('Unhandled rejection at:', promise, 'reason:', reason);
+  });
 })();

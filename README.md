@@ -107,6 +107,7 @@ All configuration is done via environment variables:
 | `NOTIFY_RELAY_SOUND` | Path to sound file | `./825639__1love__1love_fx_winner.wav` |
 | `NOTIFY_RELAY_SOUND_ENABLED` | Enable/disable sound playback | `true` |
 | `NOTIFY_RELAY_SOUND_TIMEOUT` | Sound playback timeout (ms) | `5000` |
+| `NOTIFY_RELAY_SOUND_VOLUME` | Sound volume in percent (0-100) | `25` |
 | `NOTIFY_RELAY_SOCKET_PERMISSIONS` | Socket file permissions (octal) | `0666` |
 | `NOTIFY_RELAY_LOG_LEVEL` | Logging level: debug\|info\|warn\|error | `info` |
 
@@ -224,6 +225,7 @@ NOTIFY_RELAY_SOCK=/custom/path.sock notify-as john "Test" "Custom socket"
   "timeout": 5000,
   "app": "my-app",
   "sound": false,
+  "volume": 50,
   "category": "email.arrived"
 }
 ```
@@ -236,6 +238,7 @@ NOTIFY_RELAY_SOCK=/custom/path.sock notify-as john "Test" "Custom socket"
 - `timeout` (optional): Display timeout in milliseconds (-1 for default)
 - `app` (optional): Application name (default: `notify-relay`)
 - `sound` (optional): Set to `false` to disable sound for this notification
+- `volume` (optional): Sound volume in percent (0-100) for this notification, overrides `NOTIFY_RELAY_SOUND_VOLUME`
 - `category` (optional): Notification category
 
 ### Plain Text Payload

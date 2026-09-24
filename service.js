@@ -6,7 +6,7 @@
  * freedesktop.org Notifications D-Bus interface with optional audio feedback.
  *
  * Accepts either:
- *  - JSON: {"summary":"Title","body":"Body","urgency":"low|normal|critical","icon":"dialog-information","timeout":5000,"app":"notify-relay","sound":false}
+ *  - JSON: {"summary":"Title","body":"Body","urgency":"low|normal|critical","icon":"dialog-information","timeout":5000,"app":"notify-relay","sound":false,"volume":50}
  *  - Plain: "Title|Body"
  *
  * Environment Variables:
@@ -14,13 +14,14 @@
  *  - NOTIFY_RELAY_SOUND: Path to sound file (default: ./825639__1love__1love_fx_winner.wav)
  *  - NOTIFY_RELAY_SOUND_ENABLED: Enable/disable sound (default: true)
  *  - NOTIFY_RELAY_SOUND_TIMEOUT: Sound playback timeout in ms (default: 5000)
+ *  - NOTIFY_RELAY_SOUND_VOLUME: Sound volume in percent, 0-100 (default: 25)
  *  - NOTIFY_RELAY_SOCKET_PERMISSIONS: Socket file permissions (default: 0666)
  *  - NOTIFY_RELAY_LOG_LEVEL: Logging level: debug|info|warn|error (default: info)
  */
 const fs = require('fs');
 const net = require('net');
 const path = require('path');
-const { execSync } = require('child_process');
+const { execFileSync } = require('child_process');
 const { Variant, sessionBus } = require('dbus-next');
 
 // ---- Configuration ---------------------------------------------------------
@@ -31,8 +32,17 @@ const SOCK_PATH = process.env.NOTIFY_RELAY_SOCK || DEFAULT_SOCK;
 const SOUND_FILE = process.env.NOTIFY_RELAY_SOUND || path.join(__dirname, '825639__1love__1love_fx_winner.wav');
 const SOUND_ENABLED = process.env.NOTIFY_RELAY_SOUND_ENABLED !== 'false';
 const SOUND_TIMEOUT = parseInt(process.env.NOTIFY_RELAY_SOUND_TIMEOUT, 10) || 5000;
+const SOUND_VOLUME = parseVolume(process.env.NOTIFY_RELAY_SOUND_VOLUME) ?? 25;
 const SOCKET_PERMISSIONS = parseInt(process.env.NOTIFY_RELAY_SOCKET_PERMISSIONS, 8) || 0o666;
 const LOG_LEVEL = (process.env.NOTIFY_RELAY_LOG_LEVEL || 'info').toLowerCase();
+
+// Parse a volume percentage (0-100); returns undefined for missing/invalid input
+function parseVolume(v) {
+  if (v == null || v === '') return undefined;
+  const n = Number(v);
+  if (!Number.isFinite(n)) return undefined;
+  return Math.min(100, Math.max(0, n));
+}
 
 // ---- Logging ---------------------------------------------------------------
 const LOG_LEVELS = { debug: 0, info: 1, warn: 2, error: 3 };
@@ -91,7 +101,45 @@ function urgencyToHint(u) {
   return result;
 }
 
-function playSound(soundPath) {
+// Scale the PCM samples of a WAV buffer in place by `gain` (0..1).
+// Volume is applied to the audio data itself because PulseAudio/PipeWire
+// stream-restore overrides any per-stream volume the player requests.
+// Returns false if the WAV format is not supported.
+function scaleWav(buf, gain) {
+  if (buf.toString('ascii', 0, 4) !== 'RIFF' || buf.toString('ascii', 8, 12) !== 'WAVE') return false;
+
+  let format, bits, offset = 12;
+  while (offset + 8 <= buf.length) {
+    const id = buf.toString('ascii', offset, offset + 4);
+    const size = buf.readUInt32LE(offset + 4);
+    const start = offset + 8;
+
+    if (id === 'fmt ') {
+      format = buf.readUInt16LE(start);
+      bits = buf.readUInt16LE(start + 14);
+      // WAVE_FORMAT_EXTENSIBLE: real format is the first 2 bytes of the sub-format GUID
+      if (format === 0xfffe) format = buf.readUInt16LE(start + 24);
+    } else if (id === 'data') {
+      const end = Math.min(start + size, buf.length);
+      if (format === 1 && bits === 16) {
+        for (let i = start; i + 2 <= end; i += 2) buf.writeInt16LE(Math.round(buf.readInt16LE(i) * gain), i);
+      } else if (format === 1 && bits === 24) {
+        for (let i = start; i + 3 <= end; i += 3) buf.writeIntLE(Math.round(buf.readIntLE(i, 3) * gain), i, 3);
+      } else if (format === 1 && bits === 32) {
+        for (let i = start; i + 4 <= end; i += 4) buf.writeInt32LE(Math.round(buf.readInt32LE(i) * gain), i);
+      } else if (format === 3 && bits === 32) {
+        for (let i = start; i + 4 <= end; i += 4) buf.writeFloatLE(buf.readFloatLE(i) * gain, i);
+      } else {
+        return false;
+      }
+      return true;
+    }
+    offset = start + size + (size % 2); // chunks are word aligned
+  }
+  return false;
+}
+
+function playSound(soundPath, volume = SOUND_VOLUME) {
   if (!SOUND_ENABLED) {
     logger.debug('Sound playback disabled');
     return;
@@ -103,10 +151,17 @@ function playSound(soundPath) {
   }
 
   try {
-    logger.debug(`Playing sound: ${soundPath}`);
-    execSync(`aplay -d 3 "${soundPath}"`, {
+    const wav = fs.readFileSync(soundPath);
+    // Cubic curve, matching how desktop volume sliders map percent to loudness
+    const gain = Math.pow(volume / 100, 3);
+    if (!scaleWav(wav, gain)) {
+      logger.warn(`Unsupported WAV format, playing at original volume: ${soundPath}`);
+    }
+    logger.debug(`Playing sound: ${soundPath} at ${volume}%`);
+    execFileSync('aplay', ['-q', '-d', '3', '-'], {
+      input: wav,
       timeout: SOUND_TIMEOUT,
-      stdio: 'ignore'
+      stdio: ['pipe', 'ignore', 'ignore']
     });
   } catch (err) {
     logger.error('Failed to play sound:', err.message);
@@ -156,7 +211,7 @@ async function notify(bus, payload) {
 
     // Play sound if not explicitly disabled
     if (payload.sound !== false) {
-      playSound(SOUND_FILE);
+      playSound(SOUND_FILE, parseVolume(payload.volume) ?? SOUND_VOLUME);
     }
 
     return notificationId;
@@ -175,6 +230,7 @@ async function notify(bus, payload) {
     soundEnabled: SOUND_ENABLED,
     soundFile: SOUND_FILE,
     soundTimeout: SOUND_TIMEOUT,
+    soundVolume: SOUND_VOLUME,
     socketPermissions: SOCKET_PERMISSIONS.toString(8),
     logLevel: LOG_LEVEL
   });

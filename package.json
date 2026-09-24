@@ -10,6 +10,6 @@
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "dependencies": {
-    "dbus-next": "^0.10.2"
+    "@particle/dbus-next": "^0.11.4"
   }
 }

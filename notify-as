@@ -62,7 +62,8 @@ JSON Payload Format:
     "urgency": "low|normal|critical",
     "icon": "dialog-information",
     "timeout": 5000,
-    "sound": false
+    "sound": false,
+    "volume": 50
   }
 
 Environment Variables:

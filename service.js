@@ -22,7 +22,7 @@ const fs = require('fs');
 const net = require('net');
 const path = require('path');
 const { execFileSync } = require('child_process');
-const { Variant, sessionBus } = require('dbus-next');
+const { Variant, sessionBus } = require('@particle/dbus-next');
 
 // ---- Configuration ---------------------------------------------------------
 const UID = process.getuid();
